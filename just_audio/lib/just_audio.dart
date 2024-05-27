@@ -2360,7 +2360,6 @@ abstract class UriAudioSource extends IndexedAudioSource {
         player._useProxyForRequestHeaders &&
         (headers != null || player._userAgent != null)) {
       await player._proxy.ensureRunning();
-      print('usage1');
       _overrideUri = player._proxy.addUriAudioSource(this);
     }
   }
