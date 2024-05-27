@@ -2077,6 +2077,8 @@ class _ProxyHttpServer {
   Uri addUriAudioSource(UriAudioSource source) {
     final uri = source.uri;
     final headers = <String, String>{};
+    final refreshCredentials = source.refreshCredentials;
+    final getAuthHeaders = source.getAuthHeaders;
     if (source.headers != null) {
       headers.addAll(source.headers!.cast<String, String>());
     }
@@ -2085,6 +2087,8 @@ class _ProxyHttpServer {
       uri,
       headers: headers,
       userAgent: source._player?._userAgent,
+      refreshCredentials: refreshCredentials,
+      getAuthHeaders: getAuthHeaders,
     );
     return uri.replace(
       scheme: 'http',
@@ -2200,6 +2204,14 @@ abstract class AudioSource {
   final String _id;
   AudioPlayer? _player;
 
+  /// If a request needs authorization headers, logically it needs to refresh credentials.
+  /// In case of giving a playlist with lazy load, the player freezes if there is no
+  /// inbuilt refresh tokens mechanism
+  final Future<void> Function()? refreshCredentials;
+
+  /// getter function for additional headers to auth
+  final Map<String, String> Function()? getAuthHeaders;
+
   /// Creates an [AudioSource] from a [Uri] with optional headers by
   /// attempting to guess the type of stream. On iOS, this uses Apple's SDK to
   /// automatically detect the stream type. On Android, the type of stream will
@@ -2223,7 +2235,7 @@ abstract class AudioSource {
   /// for background audio purposes, consider using the plugin audio_service
   /// instead of just_audio_background.
   static UriAudioSource uri(Uri uri,
-      {Map<String, String>? headers, dynamic tag}) {
+      {Map<String, String>? headers, dynamic tag, Future<void> Function()? refreshCredentials, Map<String, String> Function()? getAuthHeaders}) {
     bool hasExtension(Uri uri, String extension) =>
         uri.path.toLowerCase().endsWith('.$extension') ||
         uri.fragment.toLowerCase().endsWith('.$extension');
@@ -2232,7 +2244,7 @@ abstract class AudioSource {
     } else if (hasExtension(uri, 'm3u8')) {
       return HlsAudioSource(uri, headers: headers, tag: tag);
     } else {
-      return ProgressiveAudioSource(uri, headers: headers, tag: tag);
+      return ProgressiveAudioSource(uri, headers: headers, tag: tag, refreshCredentials: refreshCredentials, getAuthHeaders: getAuthHeaders,);
     }
   }
 
@@ -2264,7 +2276,7 @@ abstract class AudioSource {
     return AudioSource.uri(Uri.parse('asset:///$keyName'), tag: tag);
   }
 
-  AudioSource() : _id = _uuid.v4();
+  AudioSource({this.refreshCredentials, this.getAuthHeaders}) : _id = _uuid.v4();
 
   @mustCallSuper
   Future<void> _setup(AudioPlayer player) async {
@@ -2303,7 +2315,7 @@ abstract class IndexedAudioSource extends AudioSource {
   final dynamic tag;
   Duration? duration;
 
-  IndexedAudioSource({this.tag, this.duration});
+  IndexedAudioSource({this.tag, this.duration, super.refreshCredentials, super.getAuthHeaders});
 
   @override
   void _shuffle({int? initialIndex}) {}
@@ -2321,7 +2333,7 @@ abstract class UriAudioSource extends IndexedAudioSource {
   final Map<String, String>? headers;
   Uri? _overrideUri;
 
-  UriAudioSource(this.uri, {this.headers, dynamic tag, Duration? duration})
+  UriAudioSource(this.uri, {this.headers, dynamic tag, Duration? duration, super.refreshCredentials, super.getAuthHeaders,})
       : super(tag: tag, duration: duration);
 
   /// If [uri] points to an asset, this gives us [_overrideUri] which is the URI
@@ -2348,6 +2360,7 @@ abstract class UriAudioSource extends IndexedAudioSource {
         player._useProxyForRequestHeaders &&
         (headers != null || player._userAgent != null)) {
       await player._proxy.ensureRunning();
+      print('usage1');
       _overrideUri = player._proxy.addUriAudioSource(this);
     }
   }
@@ -2422,6 +2435,8 @@ class ProgressiveAudioSource extends UriAudioSource {
     super.tag,
     super.duration,
     this.options,
+    super.refreshCredentials,
+    super.getAuthHeaders,
   });
 
   @override
@@ -2531,6 +2546,8 @@ class ConcatenatingAudioSource extends AudioSource {
     required this.children,
     this.useLazyPreparation = true,
     ShuffleOrder? shuffleOrder,
+    super.refreshCredentials,
+    super.getAuthHeaders,
   }) : _shuffleOrder = shuffleOrder ?? DefaultShuffleOrder()
           ..insert(0, children.length);
 
@@ -3321,6 +3338,8 @@ _ProxyHandler _proxyHandlerForUri(
   Uri uri, {
   Map<String, String>? headers,
   String? userAgent,
+  Future<void> Function()? refreshCredentials,
+  Map<String, String> Function()? getAuthHeaders
 }) {
   // Keep redirected [Uri] to speed-up requests
   Uri? redirectedUri;
@@ -3334,14 +3353,31 @@ _ProxyHandler _proxyHandlerForUri(
           .forEach((name, value) => requestHeaders[name] = value.join(', '));
       // write supplied headers last (to ensure supplied headers aren't overwritten)
       headers?.forEach((name, value) => requestHeaders[name] = value);
-      final originRequest =
+      if(getAuthHeaders!=null) {
+        final authHeaders = getAuthHeaders();
+        authHeaders.forEach((name, value) => requestHeaders[name] = value);
+      }
+      var originRequest =
           await _getUrl(client, redirectedUri ?? uri, headers: requestHeaders);
       host = originRequest.headers.value(HttpHeaders.hostHeader);
-      final originResponse = await originRequest.close();
+      var originResponse = await originRequest.close();
       if (originResponse.redirects.isNotEmpty) {
         redirectedUri = originResponse.redirects.last.location;
       }
-
+      if(refreshCredentials!=null && originResponse.statusCode == HttpStatus.unauthorized) {
+          await refreshCredentials();
+          if(getAuthHeaders!=null) {
+            final authHeaders = getAuthHeaders();
+            authHeaders.forEach((name, value) => requestHeaders[name] = value);
+          }
+          originRequest =
+          await _getUrl(client, redirectedUri ?? uri, headers: requestHeaders);
+          host = originRequest.headers.value(HttpHeaders.hostHeader);
+          originResponse = await originRequest.close();
+          if (originResponse.redirects.isNotEmpty) {
+            redirectedUri = originResponse.redirects.last.location;
+          }
+      }
       request.response.headers.clear();
       originResponse.headers.forEach((name, value) {
         final filteredValue = value
