@@ -811,7 +811,7 @@ class AudioPlayer {
       final initialSeekValues = _initialSeekValues;
       _initialSeekValues = null;
       return await _load(await _platform, _audioSource!,
-          initialSeekValues: initialSeekValues);
+          initialSeekValues: initialSeekValues, onError: _audioSource!.onError);
     } else {
       // This will implicitly load the current audio source.
       return await _setPlatformActive(true);
@@ -845,7 +845,7 @@ class AudioPlayer {
   }
 
   Future<Duration?> _load(AudioPlayerPlatform platform, AudioSource source,
-      {_InitialSeekValues? initialSeekValues}) async {
+      {_InitialSeekValues? initialSeekValues, void Function(String error)? onError}) async {
     final activationNumber = _activationCount;
     void checkInterruption() {
       if (_activationCount != activationNumber) {
@@ -871,6 +871,7 @@ class AudioPlayer {
       _durationSubject.add(duration);
       if (platform != _platformValue) {
         // the platform has changed since we started loading, so abort.
+        if (onError!=null) onError("PlatformException(code: 'abort', message: 'Loading interrupted')");
         throw PlatformException(code: 'abort', message: 'Loading interrupted');
       }
       // Wait for loading state to pass.
@@ -880,9 +881,11 @@ class AudioPlayer {
       return duration;
     } on PlatformException catch (e) {
       try {
+        if (onError!=null) onError("PlayerException: ${int.parse(e.code)} ${e.message}");
         throw PlayerException(int.parse(e.code), e.message,
             (e.details as Map<dynamic, dynamic>?)?.cast<String, dynamic>());
-      } on FormatException catch (_) {
+      } on FormatException catch (f) {
+        if (onError!=null) onError("FormatException: $f");
         if (e.code == 'abort') {
           throw PlayerInterruptedException(e.message);
         } else {
@@ -910,7 +913,7 @@ class AudioPlayer {
                 start: start,
                 end: end,
                 tag: tag,
-              ));
+              ), onError: _audioSource?.onError);
     return duration;
   }
 
@@ -1507,7 +1510,7 @@ class AudioPlayer {
               _InitialSeekValues(position: position, index: currentIndex);
           _initialSeekValues = null;
           final duration = await _load(platform, _audioSource!,
-              initialSeekValues: initialSeekValues);
+              initialSeekValues: initialSeekValues, onError: _audioSource!.onError);
           if (checkInterruption()) return platform;
           durationCompleter.complete(duration);
         } catch (e, stackTrace) {
